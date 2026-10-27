@@ -10,9 +10,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-// AI (DeepSeek): Prompt "How to design a tokenizer struct for a C parser to track file positions"
-//   I used the idea of storing the token type and its exact byte position for error reporting.
 typedef enum {
     TOK_EOF, TOK_NEWLINE, TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, 
     TOK_POW, TOK_LPAREN, TOK_RPAREN, TOK_INT, TOK_FLOAT, TOK_ERROR
@@ -31,17 +30,21 @@ typedef struct {
     size_t cursor;
 } Lexer;
 
-// Global parser state (makes it easy to pass around)
 Lexer lexer;
 Token current_token;
+
+// Forward declaration so advance() knows next_token exists
+Token next_token(Lexer *lexer);
+
+// If an error occurs, we store its 1-based position here.
+// If it's 0, no error has occurred.
+size_t error_pos = 0; 
 
 void advance() {
     current_token = next_token(&lexer);
 }
 
 // --- TOKENIZER ---
-// AI (DeepSeek): Prompt "How to write a lexer that skips spaces but tracks newlines for error positions"
-//   I used this to handle the space/tab skipping while keeping track of the exact \n position.
 Token next_token(Lexer *lexer) {
     Token tok;
     tok.pos = lexer->cursor;
@@ -74,7 +77,6 @@ Token next_token(Lexer *lexer) {
         case '\n': tok.type = TOK_NEWLINE; lexer->cursor++; return tok;
     }
 
-    // Handle numbers
     if (c >= '0' && c <= '9') {
         long long val = 0;
         while (lexer->cursor < lexer->length && lexer->buffer[lexer->cursor] >= '0' && lexer->buffer[lexer->cursor] <= '9') {
@@ -91,35 +93,47 @@ Token next_token(Lexer *lexer) {
 }
 
 // --- PARSER ---
-// These functions are declared here so they can call each other recursively
+// AI (DeepSeek): Prompt "How to implement exact error positions in a recursive descent parser for math expressions"
+//   I used the advice to set a global error_pos using the current token's 1-based position (tok.pos + 1).
 double parse_expr(void);
 double parse_term(void);
 double parse_power(void);
 double parse_primary(void);
 
 double parse_primary(void) {
+    if (error_pos > 0) return 0.0;
+
     if (current_token.type == TOK_INT) {
         double val = (double)current_token.ival;
         advance();
         return val;
     }
+    
     if (current_token.type == TOK_LPAREN) {
         advance();
         double val = parse_expr();
-        if (current_token.type == TOK_RPAREN) {
-            advance();
-            return val;
+        
+        // Check for missing closing parenthesis
+        if (current_token.type != TOK_RPAREN) {
+            error_pos = current_token.pos + 1;
+            return 0.0;
         }
+        
+        advance();
+        return val;
     }
-    // Error handling will go here later
+
+    error_pos = current_token.pos + 1;
     return 0.0;
 }
 
 double parse_power(void) {
+    if (error_pos > 0) return 0.0;
+
     double base = parse_primary();
     if (current_token.type == TOK_POW) {
         advance();
-        double exp = parse_power(); // Right associative
+        double exp = parse_power(); 
         double result = 1.0;
         for (int i = 0; i < (int)exp; i++) result *= base;
         return result;
@@ -128,40 +142,95 @@ double parse_power(void) {
 }
 
 double parse_term(void) {
+    if (error_pos > 0) return 0.0;
+
     double val = parse_power();
     while (current_token.type == TOK_STAR || current_token.type == TOK_SLASH) {
         TokenType op = current_token.type;
         advance();
         double right = parse_power();
+        if (error_pos > 0) return 0.0;
+
         if (op == TOK_STAR) val *= right;
-        else val /= right;
+        else {
+            // Division by zero check will go here later
+            val /= right;
+        }
     }
     return val;
 }
 
 double parse_expr(void) {
+    if (error_pos > 0) return 0.0;
+
     double val = parse_term();
     while (current_token.type == TOK_PLUS || current_token.type == TOK_MINUS) {
         TokenType op = current_token.type;
         advance();
         double right = parse_term();
+        if (error_pos > 0) return 0.0;
+
         if (op == TOK_PLUS) val += right;
         else val -= right;
     }
     return val;
 }
 
-int main(void) {
-    // For now, let's just feed it a hardcoded string to test the parser
-    char test_input[] = "2 + 3 * 4\n";
-    lexer.buffer = test_input;
-    lexer.length = 10; // Length of the string above
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <input.txt>\n", argv[0]);
+        return 1;
+    }
+
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) {
+        fprintf(stderr, "Could not open file %s\n", argv[1]);
+        return 1;
+    }
+    
+    fseek(f, 0, SEEK_END);
+    long length = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    lexer.buffer = malloc(length + 1);
+    if (fread(lexer.buffer, 1, length, f) != (size_t)length) {
+        fprintf(stderr, "Error reading file\n");
+        return 1;
+    }
+    lexer.buffer[length] = '\0';
+    lexer.length = length;
     lexer.cursor = 0;
-    
+    fclose(f);
+
     advance(); // Load first token
-    
-    double result = parse_expr();
-    printf("Result: %.15g\n", result);
-    
+
+    while (current_token.type != TOK_EOF) {
+        // Skip blank lines
+        if (current_token.type == TOK_NEWLINE) {
+            advance();
+            continue;
+        }
+
+        error_pos = 0; // Reset for this line
+        double result = parse_expr();
+
+        if (error_pos > 0) {
+            printf("ERROR:%zu\n", error_pos);
+            free(lexer.buffer);
+            return 0; 
+        }
+
+        printf("%.15g\n", result);
+
+        if (current_token.type == TOK_NEWLINE) {
+            advance();
+        } else if (current_token.type != TOK_EOF) {
+            printf("ERROR:%zu\n", current_token.pos + 1);
+            free(lexer.buffer);
+            return 0;
+        }
+    }
+
+    free(lexer.buffer);
     return 0;
 }
