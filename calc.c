@@ -20,31 +20,38 @@ typedef enum {
 
 typedef struct {
     TokenType type;
-    long long ival;     // For integers
-    double fval;        // For floats
-    size_t pos;         // Exact position in the file (0-based, we add 1 when printing)
+    long long ival;     
+    double fval;        
+    size_t pos;         
 } Token;
 
-// This struct holds the whole file in memory so we don't slow down on large files
 typedef struct {
     char *buffer;
     size_t length;
     size_t cursor;
 } Lexer;
 
+// Global parser state (makes it easy to pass around)
+Lexer lexer;
+Token current_token;
+
+void advance() {
+    current_token = next_token(&lexer);
+}
+
+// --- TOKENIZER ---
 // AI (DeepSeek): Prompt "How to write a lexer that skips spaces but tracks newlines for error positions"
 //   I used this to handle the space/tab skipping while keeping track of the exact \n position.
 Token next_token(Lexer *lexer) {
     Token tok;
     tok.pos = lexer->cursor;
     
-    // Skip spaces and tabs
     while (lexer->cursor < lexer->length && 
           (lexer->buffer[lexer->cursor] == ' ' || lexer->buffer[lexer->cursor] == '\t')) {
         lexer->cursor++;
     }
     
-    tok.pos = lexer->cursor; // Update position after spaces
+    tok.pos = lexer->cursor; 
     
     if (lexer->cursor >= lexer->length) {
         tok.type = TOK_EOF;
@@ -53,7 +60,6 @@ Token next_token(Lexer *lexer) {
 
     char c = lexer->buffer[lexer->cursor];
 
-    // Handle single-character tokens
     switch (c) {
         case '+': tok.type = TOK_PLUS; lexer->cursor++; return tok;
         case '-': tok.type = TOK_MINUS; lexer->cursor++; return tok;
@@ -68,13 +74,94 @@ Token next_token(Lexer *lexer) {
         case '\n': tok.type = TOK_NEWLINE; lexer->cursor++; return tok;
     }
 
-    // If we get here, it's a number or an error. 
-    // (We'll handle numbers in the next step, for now just mark it as ERROR if it's not a digit)
+    // Handle numbers
+    if (c >= '0' && c <= '9') {
+        long long val = 0;
+        while (lexer->cursor < lexer->length && lexer->buffer[lexer->cursor] >= '0' && lexer->buffer[lexer->cursor] <= '9') {
+            val = val * 10 + (lexer->buffer[lexer->cursor] - '0');
+            lexer->cursor++;
+        }
+        tok.type = TOK_INT;
+        tok.ival = val;
+        return tok;
+    }
+
     tok.type = TOK_ERROR; 
     return tok; 
 }
 
+// --- PARSER ---
+// These functions are declared here so they can call each other recursively
+double parse_expr(void);
+double parse_term(void);
+double parse_power(void);
+double parse_primary(void);
+
+double parse_primary(void) {
+    if (current_token.type == TOK_INT) {
+        double val = (double)current_token.ival;
+        advance();
+        return val;
+    }
+    if (current_token.type == TOK_LPAREN) {
+        advance();
+        double val = parse_expr();
+        if (current_token.type == TOK_RPAREN) {
+            advance();
+            return val;
+        }
+    }
+    // Error handling will go here later
+    return 0.0;
+}
+
+double parse_power(void) {
+    double base = parse_primary();
+    if (current_token.type == TOK_POW) {
+        advance();
+        double exp = parse_power(); // Right associative
+        double result = 1.0;
+        for (int i = 0; i < (int)exp; i++) result *= base;
+        return result;
+    }
+    return base;
+}
+
+double parse_term(void) {
+    double val = parse_power();
+    while (current_token.type == TOK_STAR || current_token.type == TOK_SLASH) {
+        TokenType op = current_token.type;
+        advance();
+        double right = parse_power();
+        if (op == TOK_STAR) val *= right;
+        else val /= right;
+    }
+    return val;
+}
+
+double parse_expr(void) {
+    double val = parse_term();
+    while (current_token.type == TOK_PLUS || current_token.type == TOK_MINUS) {
+        TokenType op = current_token.type;
+        advance();
+        double right = parse_term();
+        if (op == TOK_PLUS) val += right;
+        else val -= right;
+    }
+    return val;
+}
+
 int main(void) {
-    printf("Hello, calc!\n");
+    // For now, let's just feed it a hardcoded string to test the parser
+    char test_input[] = "2 + 3 * 4\n";
+    lexer.buffer = test_input;
+    lexer.length = 10; // Length of the string above
+    lexer.cursor = 0;
+    
+    advance(); // Load first token
+    
+    double result = parse_expr();
+    printf("Result: %.15g\n", result);
+    
     return 0;
 }
